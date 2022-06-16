@@ -4,7 +4,10 @@ Order model definitions
 
 # -*- coding: utf-8 -*-
 
+import logging
 import os
+import sys
+import traceback
 from datetime import datetime
 from decimal import Decimal
 
@@ -19,12 +22,15 @@ from django.dispatch.dispatcher import receiver
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
+from djmoney.contrib.exchange.exceptions import MissingRate
 from djmoney.contrib.exchange.models import convert_money
 from djmoney.money import Money
+from error_report.models import Error
 from markdownx.models import MarkdownxField
 from mptt.models import TreeForeignKey
 
 import InvenTree.helpers
+import InvenTree.ready
 from common.settings import currency_code_default
 from company.models import Company, SupplierPart
 from InvenTree.fields import InvenTreeModelMoneyField, RoundingDecimalField
@@ -37,6 +43,8 @@ from plugin.events import trigger_event
 from plugin.models import MetadataMixin
 from stock import models as stock_models
 from users import models as UserModels
+
+logger = logging.getLogger('inventree')
 
 
 def get_next_po_number():
@@ -151,23 +159,74 @@ class Order(MetadataMixin, ReferenceIndexingMixin):
 
     notes = MarkdownxField(blank=True, verbose_name=_('Notes'), help_text=_('Order notes'))
 
-    def get_total_price(self):
+    def get_total_price(self, target_currency=currency_code_default()):
         """
-        Calculates the total price of all order lines
+        Calculates the total price of all order lines, and converts to the specified target currency.
+
+        If not specified, the default system currency is used.
+
+        If currency conversion fails (e.g. there are no valid conversion rates),
+        then we simply return zero, rather than attempting some other calculation.
         """
-        target_currency = currency_code_default()
+
         total = Money(0, target_currency)
 
         # gather name reference
-        price_ref = 'sale_price' if isinstance(self, SalesOrder) else 'purchase_price'
-        # order items
-        total += sum(a.quantity * convert_money(getattr(a, price_ref), target_currency) for a in self.lines.all() if getattr(a, price_ref))
+        price_ref_tag = 'sale_price' if isinstance(self, SalesOrder) else 'purchase_price'
 
-        # extra lines
-        total += sum(a.quantity * convert_money(a.price, target_currency) for a in self.extra_lines.all() if a.price)
+        # order items
+        for line in self.lines.all():
+
+            price_ref = getattr(line, price_ref_tag)
+
+            if not price_ref:
+                continue
+
+            try:
+                total += line.quantity * convert_money(price_ref, target_currency)
+            except MissingRate:
+                # Record the error, try to press on
+                kind, info, data = sys.exc_info()
+
+                Error.objects.create(
+                    kind=kind.__name__,
+                    info=info,
+                    data='\n'.join(traceback.format_exception(kind, info, data)),
+                    path='order.get_total_price',
+                )
+
+                logger.error(f"Missing exchange rate for '{target_currency}'")
+
+                # Return None to indicate the calculated price is invalid
+                return None
+
+        # extra items
+        for line in self.extra_lines.all():
+
+            if not line.price:
+                continue
+
+            try:
+                total += line.quantity * convert_money(line.price, target_currency)
+            except MissingRate:
+                # Record the error, try to press on
+                kind, info, data = sys.exc_info()
+
+                Error.objects.create(
+                    kind=kind.__name__,
+                    info=info,
+                    data='\n'.join(traceback.format_exception(kind, info, data)),
+                    path='order.get_total_price',
+                )
+
+                logger.error(f"Missing exchange rate for '{target_currency}'")
+
+                # Return None to indicate the calculated price is invalid
+                return None
 
         # set decimal-places
         total.decimal_places = 4
+
         return total
 
 
@@ -809,9 +868,19 @@ class SalesOrder(Order):
 
 @receiver(post_save, sender=SalesOrder, dispatch_uid='build_post_save_log')
 def after_save_sales_order(sender, instance: SalesOrder, created: bool, **kwargs):
+    """Callback function to be executed after a SalesOrder instance is saved.
+
+    - If the SALESORDER_DEFAULT_SHIPMENT setting is enabled, create a default shipment
+    - Ignore if the database is not ready for access
+    - Ignore if data import is active
     """
-    Callback function to be executed after a SalesOrder instance is saved
-    """
+
+    if not InvenTree.ready.canAppAccessDatabase(allow_test=True):
+        return
+
+    if InvenTree.ready.isImportingData():
+        return
+
     if created and getSetting('SALESORDER_DEFAULT_SHIPMENT'):
         # A new SalesOrder has just been created
 
