@@ -217,18 +217,6 @@ logger.debug(f"STATIC_ROOT: '{STATIC_ROOT}'")
 
 INSTALLED_APPS = [
 
-    # Core django modules
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'user_sessions',                # db user sessions
-    'django.contrib.messages',
-    'django.contrib.staticfiles',
-    'django.contrib.sites',
-
-    # Maintenance
-    'maintenance_mode',
-
     # InvenTree apps
     'build.apps.BuildConfig',
     'common.apps.CommonConfig',
@@ -241,6 +229,18 @@ INSTALLED_APPS = [
     'users.apps.UsersConfig',
     'plugin.apps.PluginAppConfig',
     'InvenTree.apps.InvenTreeConfig',       # InvenTree app runs last
+
+    # Core django modules
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'user_sessions',                # db user sessions
+    'django.contrib.messages',
+    'django.contrib.staticfiles',
+    'django.contrib.sites',
+
+    # Maintenance
+    'maintenance_mode',
 
     # Third part add-ons
     'django_filters',                       # Extended filter functionality
@@ -522,7 +522,7 @@ if "mysql" in db_engine:  # pragma: no cover
     # https://docs.djangoproject.com/en/3.2/ref/databases/#mysql-isolation-level
     if "isolation_level" not in db_options:
         serializable = _is_true(
-            os.getenv("INVENTREE_DB_ISOLATION_SERIALIZABLE", "true")
+            os.getenv("INVENTREE_DB_ISOLATION_SERIALIZABLE", "false")
         )
         db_options["isolation_level"] = (
             "serializable" if serializable else "read committed"
